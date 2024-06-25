@@ -1,5 +1,8 @@
-import downloads
+import os
 
-downloader = downloads.JunoDownloader("../data/SPADE/")
+import juno
 
-downloader.DownloadInstrumentData("MAG", "2016209")
+
+dd = "/home/daraghhollman/Main/data/SPADE/"
+
+juno.DownloadData("JAD-E", ["2018-01-02T10:00:00", "2018-01-02T12:00:00"], dd)
