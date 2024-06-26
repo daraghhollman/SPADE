@@ -7,9 +7,11 @@ THIS FILE WILL HANDLE THE FOLLOWING FOR THE JUNO SPACECRAFT:
 
 import os
 import requests
+import astropy.time
 from tqdm import tqdm
 
 import tools
+import pdsBinaryTools
 
 
 class Downloader:
@@ -117,6 +119,160 @@ def GetPdsUrl(instrument: str) -> str:
 
     match instrument:
         case "JAD-E":
-            return "https://search-pdsppi.igpp.ucla.edu/ditdos/download?id=pds://PPI/JNO-J_SW-JAD-5-CALIBRATED-V1.0/DATA/"
+            return (
+                "https://search-pdsppi.igpp.ucla.edu/ditdos/download?id="
+                "pds://PPI/JNO-J_SW-JAD-5-CALIBRATED-V1.0/DATA/"
+            )
 
     raise ValueError("Invalid Instrument Choice")
+
+
+def LoadData(instrument: str, timeFrame: list[str], dataDirectory: str):
+    """
+    Loads data from a specific instrument
+    """
+    match instrument:
+        case "JAD-E":
+            LoadJadEData(timeFrame, dataDirectory)
+
+
+def LoadJadEData(timeFrame: list[str], dataDirectory: str):
+
+    # First we load all JAD-E files from the data directory
+    allFiles = os.listdir(os.path.join(dataDirectory, "JAD-E/"))
+    jadEFiles = [f for f in allFiles if "JAD_L50" in f and "ELC" in f]
+
+    binaryFiles = [
+        os.path.join(dataDirectory, "JAD-E/", f)
+        for f in jadEFiles
+        if f.endswith(".DAT")
+    ]
+    labelFiles = [
+        os.path.join(dataDirectory, "JAD-E/", f)
+        for f in jadEFiles
+        if f.endswith(".LBL")
+    ]
+
+    binaryFiles.sort()
+    labelFiles.sort()
+
+    multiDayData = []
+
+    for labelFile, binaryFile in zip(labelFiles, binaryFiles):
+
+        # Read files using routines from pdsBinaryTools.py
+        labelInfo, structClass = pdsBinaryTools.ReadLabel(labelFile)
+        data = pdsBinaryTools.ReadBinary(binaryFile, structClass, labelInfo)
+
+        multiDayData.append(data)
+
+    # We need to shorted the data to match the timeframe specified
+
+    newData = {"startTime": [], "endTime": [], "electrons": [], "pitchAngles": []}
+
+    print("Shortening data to match time frame...")
+    for i, data in enumerate(multiDayData):
+
+        if i == 0 and i == len(multiDayData) - 1:
+            # Only one file / day loaded
+            sliceStartIndex = 0
+            sliceEndIndex = 0
+
+            for j, time in enumerate(data["startTime"]):
+
+                # Deal with formatting stuff
+                timeStep = astropy.time.Time(time, format="isot")
+                timeStep.format = "datetime"
+
+                timeFrameStart = astropy.time.Time(timeFrame[0], format="isot")
+                timeFrameStart.format = "datetime"
+
+                if timeStep >= timeFrameStart:
+                    break
+
+                sliceStartIndex = j + 1
+
+            for j, time in enumerate(data["startTime"]):
+
+                # Deal with formatting stuff
+                timeStep = astropy.time.Time(time, format="isot")
+                timeStep.format = "datetime"
+
+                timeFrameEnd = astropy.time.Time(timeFrame[1], format="isot")
+                timeFrameEnd.format = "datetime"
+
+                if timeStep >= timeFrameEnd:
+                    break
+
+                sliceEndIndex = j
+
+            if sliceStartIndex == sliceEndIndex:
+                raise RuntimeError(
+                    "Timeframe start point and end point are closer than timestep in JADE data"
+                )
+
+            # Construct new data which is cropped to the time frame
+            newData = {
+                "startTime": data["startTime"][sliceStartIndex:sliceEndIndex],
+                "endTime": data["endTime"][sliceStartIndex:sliceEndIndex],
+                "electrons": data["data"][sliceStartIndex:sliceEndIndex],
+                "pitchAngles": data["pitch angle scale"][sliceStartIndex:sliceEndIndex],
+            }
+
+        # We importantly also need to handle the cases for where there are multiple files
+        # Starting file:
+        elif i == 0:
+            sliceStartIndex = 0
+
+            for j, time in enumerate(data["startTime"]):
+
+                # Deal with formatting stuff
+                timeStep = astropy.time.Time(time, format="isot")
+                timeStep.format = "datetime"
+
+                timeFrameStart = astropy.time.Time(timeFrame[0], format="isot")
+                timeFrameStart.format = "datetime"
+
+                if timeStep >= timeFrameStart:
+                    break
+
+                sliceStartIndex = j + 1
+
+            newData["startTime"].extend(data["startTime"][sliceStartIndex:])
+            newData["endTime"].extend(data["endTime"][sliceStartIndex:])
+            newData["electrons"].extend(data["data"][sliceStartIndex:])
+            newData["pitchAngles"].extend(data["pitch angle scale"][sliceStartIndex:])
+
+        # Ending file:
+        elif i == len(multiDayData) - 1:
+            sliceEndIndex = 0
+
+            for j, time in enumerate(data["startTime"]):
+
+                # Deal with formatting stuff
+                timeStep = astropy.time.Time(time, format="isot")
+                timeStep.format = "datetime"
+
+                timeFrameEnd = astropy.time.Time(timeFrame[1], format="isot")
+                timeFrameEnd.format = "datetime"
+
+                if timeStep >= timeFrameEnd:
+                    break
+
+                sliceEndIndex = j
+
+            newData["startTime"].extend(data["startTime"][sliceEndIndex:])
+            newData["endTime"].extend(data["endTime"][sliceEndIndex:])
+            newData["electrons"].extend(data["data"][sliceEndIndex:])
+            newData["pitchAngles"].extend(data["pitch angle scale"][sliceEndIndex:])
+
+        # File is in the middle
+        else:
+            newData["startTime"].extend(data["startTime"])
+            newData["endTime"].extend(data["endTime"])
+            newData["electrons"].extend(data["data"])
+            newData["pitchAngles"].extend(data["pitch angle scale"])
+
+
+    # We have now concatinated the data but need to perform pre-processing
+    timeFmt = "%Y-%m-%dT%H:%M:%S.%f"
